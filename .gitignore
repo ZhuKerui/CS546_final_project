@@ -2,3 +2,6 @@ relation-extraction
 fact-retrieval*
 webnlg_dataset
 __pycache__/
+property_map.json
+logs.txt
+best_property_prompt.pt

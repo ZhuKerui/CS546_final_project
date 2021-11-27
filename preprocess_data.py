@@ -18,7 +18,7 @@ def generate_seq(data:list):
     for tri in data:
         sub, obj, rel = tri['subject'], tri['object'], tri['property']
         if sub == obj:
-            return [sub, rel, obj]
+            return [sub, '[P]', obj], [rel]
         parent[obj] = sub
         if sub not in children:
             children[sub] = []
@@ -28,14 +28,16 @@ def generate_seq(data:list):
     while root in parent:
         root = parent[root]
     seq = []
+    relation_list = []
     def dfs(root:str):
         seq.append(root)
         if root in children:
             for child in children[root]:
-                seq.append(relations[(root, child)])
+                relation_list.append(relations[(root, child)])
+                seq.append('[P]')
                 dfs(child)
     dfs(root)
-    return seq
+    return seq, relation_list
 
 
 if __name__ == '__main__':
@@ -53,8 +55,8 @@ if __name__ == '__main__':
             unused_labels = ['originaltriplesets', 'xml_id', 'size', 'shape', 'shape_type']
             for label in unused_labels:
                 new_data_sample.pop(label)
-            triples = new_data_sample.pop('modifiedtripleset')
-            new_data_sample['input_seq'] = generate_seq(triples)
+            triples = new_data_sample['modifiedtripleset']
+            new_data_sample['input_seq'], new_data_sample['properties'] = generate_seq(triples)
             new_data_sample['target_sents'] = [sent['lex'] for sent in new_data_sample.pop('lexicalisations')]
             new_data_samples.append(new_data_sample)
         with open(v[1], 'w') as f_out:

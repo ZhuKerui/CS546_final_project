@@ -1,0 +1,49 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        }
+        // {
+        //     "name": "Python: Current File",
+        //     "type": "python",
+        //     "request": "launch",
+        //     // "program": "${file}",
+        //     "module": "autoprompt.create_trigger",
+        //     "console": "integratedTerminal",
+        //     "args": [
+        //         "--train",
+        //         "${workspaceFolder}/relation-extraction/P17/train.jsonl",
+        //         "--dev",
+        //         "${workspaceFolder}/relation-extraction/P17/dev.jsonl",
+        //         "--template",
+        //         "'[CLS] {context} [SEP] {sub_label} [T] [T] [T] [P] . [SEP]'",
+        //         "--num-cand",
+        //         "10",
+        //         "--accumulation-steps",
+        //         "1",
+        //         "--model-name",
+        //         "bert-base-cased",
+        //         "--bsz",
+        //         "32",
+        //         "--eval-size",
+        //         "32",
+        //         "--iters",
+        //         "500",
+        //         "--label-field",
+        //         "obj_label",
+        //         "--tokenize-labels",
+        //         "--filter",
+        //         "--print-lama",
+        //         "--use-ctx"
+        //     ]
+        // }
+    ]
+}
