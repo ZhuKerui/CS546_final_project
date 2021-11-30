@@ -14,11 +14,33 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoConfig, AutoModelWithLMHead, AutoTokenizer
 from tqdm import tqdm
 
+import os
+
+maskInit_train_origFunc = {'log_file' : 'maskInit_train_origFunc.txt', 
+                            'device' : '0', 
+                            'model_cp' : 'maskInit_train_origFunc.pt',
+                            'iter' : '1000'}
+
+maskInit_noTrain_origFunc = {'log_file' : 'maskInit_noTrain_origFunc.txt', 
+                            'device' : '1', 
+                            'model_cp' : 'maskInit_noTrain_origFunc.pt',
+                            'iter' : '0'}
+
+maskInit_train_origFunc_origDev = {'log_file' : 'maskInit_train_origFunc_origDev.txt', 
+                            'device' : '2', 
+                            'model_cp' : 'maskInit_train_origFunc_origDev.pt',
+                            'iter' : '1000'}
+
+config_ = maskInit_train_origFunc_origDev
+
+
+os.environ["CUDA_VISIBLE_DEVICES"]=config_['device']
+
 logging.basicConfig(format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
     datefmt='%d-%m-%Y:%H:%M:%S',
     level=logging.INFO,
     filemode='w',
-    filename='logs.txt')
+    filename=config_['log_file'])
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
@@ -59,7 +81,7 @@ parser.add_argument('--num-cand', type=int, default=10)
 parser.add_argument('--sentence-size', type=int, default=50)
 
 parser.add_argument('--debug', action='store_true')
-args = parser.parse_args(['--train', 'webnlg_dataset/webnlg_train.jsonl', '--dev', 'webnlg_dataset/webnlg_dev.jsonl', '--num-cand', '10', '--accumulation-steps', '1', '--model-name', 'facebook/bart-base', '--bsz', '56', '--eval-size', '56', '--iters', '1000', '--tokenize-labels', '--filter', '--print-lama'])
+args = parser.parse_args(['--train', 'webnlg_dataset/webnlg_train.jsonl', '--dev', 'webnlg_dataset/webnlg_dev.jsonl', '--num-cand', '10', '--accumulation-steps', '1', '--model-name', 'facebook/bart-base', '--bsz', '56', '--eval-size', '56', '--iters', config_['iter'], '--tokenize-labels', '--filter', '--print-lama'])
 
 if args.debug:
     level = logging.DEBUG
@@ -296,7 +318,10 @@ def load_trigger_dataset(fname, templatizer):
 #     train_dataset = load_augmented_trigger_dataset(args.train, templatizer, limit=args.limit)
 # else:
 train_dataset = load_trigger_dataset(args.train, templatizer)
-train_loader = DataLoader(train_dataset, batch_size=args.bsz, shuffle=True, collate_fn=collator)
+train_loader = DataLoader(train_dataset, batch_size=args.bsz, collate_fn=collator)
+
+# train_2_dataset = load_trigger_dataset(args.train, templatizer)
+# train_2_loader = DataLoader(train_2_dataset, batch_size=args.bsz, collate_fn=collator)
 
 # if args.perturbed:
 #     dev_dataset = utils.load_augmented_trigger_dataset(args.dev, templatizer)
@@ -416,6 +441,7 @@ for i in tqdm(range(args.iters)):
 
     logger.info('Evaluating Candidates')
     train_iter = iter(train_loader)
+    # train_2_iter = iter(train_2_loader)
 
     token_to_flip = torch.randint(0, 3, (property_prompt.size(0),)).to(device)
     token_to_flip_one_hot = (F.one_hot(token_to_flip, num_classes=3) * 1.0)
@@ -464,7 +490,7 @@ for i in tqdm(range(args.iters)):
     #     if trigger_ids.eq(tokenizer.mask_token_id).any():
     #         current_score = float('-inf')
 
-    if (candidate_scores > current_score).any():
+    if (candidate_scores < current_score).any():
         logger.info('Better trigger detected.')
         best_candidate_score = candidate_scores.max()
         best_candidate_idx = candidate_scores.argmax()
@@ -497,7 +523,7 @@ for i in tqdm(range(args.iters)):
     #     if best_trigger_ids.eq(tokenizer.mask_token_id).any():
     #         best_dev_metric = float('-inf')
 
-    if dev_metric > best_dev_metric:
+    if dev_metric < best_dev_metric:
         logger.info('Best performance so far')
         best_property_prompt = property_prompt.clone()
         best_dev_metric = dev_metric
@@ -505,4 +531,4 @@ for i in tqdm(range(args.iters)):
 
 
 logger.info(f'Best dev metric: {best_dev_metric}')
-torch.save(best_property_prompt, 'best_property_prompt.pt')
+torch.save(best_property_prompt, config_['model_cp'])
