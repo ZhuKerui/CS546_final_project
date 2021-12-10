@@ -5,3 +5,5 @@ __pycache__/
 property_map.json
 *.pt
 *.txt
+temp/
+out/

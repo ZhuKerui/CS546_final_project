@@ -4,3 +4,5 @@ mv webnlg_dataset/*/*/*/* webnlg_dataset
 rm webnlg_dataset.zip
 cd webnlg_dataset
 rm -rf */
+mkdir raw
+mv *.json raw

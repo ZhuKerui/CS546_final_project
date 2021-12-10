@@ -1,0 +1,20 @@
+log_file: 'out/mix/propertyInit_train_origFunc_origDev.txt'
+device: '1'
+property_map: 'property_map.json'
+property_prompt_cp: 'out/mix/propertyInit_train_origFunc_origDev.pt'
+propertyInit: true
+
+# Training setting
+iter: 1000
+train: 'webnlg_dataset/mix/webnlg_train.jsonl'
+dev: 'webnlg_dataset/mix/webnlg_dev.jsonl'
+num_cand: 10
+accumulation_steps: 1
+model_name: 'facebook/bart-base'
+bsz: 56
+eval_size: 56
+tokenize_labels: true
+filter: true
+print_lama: true
+seed: 0
+debug: true

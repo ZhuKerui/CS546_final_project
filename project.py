@@ -1,11 +1,10 @@
-import time
 import argparse
 import json
 import logging
-from pathlib import Path
+import yaml
+import re
 import random
 from collections import defaultdict
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,82 +12,41 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoConfig, AutoModelWithLMHead, AutoTokenizer
 from tqdm import tqdm
-
 import os
 
-maskInit_train_origFunc = {'log_file' : 'maskInit_train_origFunc.txt', 
-                            'device' : '0', 
-                            'model_cp' : 'maskInit_train_origFunc.pt',
-                            'iter' : '1000'}
 
-maskInit_noTrain_origFunc = {'log_file' : 'maskInit_noTrain_origFunc.txt', 
-                            'device' : '1', 
-                            'model_cp' : 'maskInit_noTrain_origFunc.pt',
-                            'iter' : '0'}
+def get_config():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-config", "--config", required=True, type=str, help="path to the config file"
+    )
+    args = vars(parser.parse_args())
 
-maskInit_train_origFunc_origDev = {'log_file' : 'maskInit_train_origFunc_origDev.txt', 
-                            'device' : '2', 
-                            'model_cp' : 'maskInit_train_origFunc_origDev.pt',
-                            'iter' : '1000'}
+    with open(args['config']) as config_in:
+        config = yaml.safe_load(config_in)
+        
+    print("**************** MODEL CONFIGURATION ****************")
+    for key in sorted(config.keys()):
+        val = config[key]
+        keystr = "{}".format(key) + (" " * (24 - len(key)))
+        print("{} -->   {}".format(keystr, val))
+    print("**************** MODEL CONFIGURATION ****************")
+    
+    return config
 
-config_ = maskInit_train_origFunc_origDev
 
-
-os.environ["CUDA_VISIBLE_DEVICES"]=config_['device']
-
-logging.basicConfig(format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
-    datefmt='%d-%m-%Y:%H:%M:%S',
-    level=logging.INFO,
-    filemode='w',
-    filename=config_['log_file'])
-logger = logging.getLogger(__name__)
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--train', type=Path, required=True, help='Train data path')
-parser.add_argument('--dev', type=Path, required=True, help='Dev data path')
-parser.add_argument('--property-map', type=str, default=None, help='JSON object defining property map')
-parser.add_argument('--property-prompt', type=str, default=None, help='Tokens for each property')
-
-# LAMA-specific
-parser.add_argument('--tokenize-labels', action='store_true',
-                    help='If specified labels are split into word pieces.'
-                            'Needed for LAMA probe experiments.')
-parser.add_argument('--filter', action='store_true',
-                    help='If specified, filter out special tokens and gold objects.'
-                            'Furthermore, tokens starting with capital '
-                            'letters will not appear in triggers. Lazy '
-                            'approach for removing proper nouns.')
-parser.add_argument('--print-lama', action='store_true',
-                    help='Prints best trigger in LAMA format.')
-
-parser.add_argument('--initial-trigger', nargs='+', type=str, default=None, help='Manual prompt')
-
-parser.add_argument('--bsz', type=int, default=32, help='Batch size')
-parser.add_argument('--eval-size', type=int, default=256, help='Eval size')
-parser.add_argument('--iters', type=int, default=100,
-                    help='Number of iterations to run trigger search algorithm')
-parser.add_argument('--accumulation-steps', type=int, default=10)
-parser.add_argument('--model-name', type=str, default='bert-base-cased',
-                    help='Model name passed to HuggingFace AutoX classes.')
-parser.add_argument('--seed', type=int, default=0)
-parser.add_argument('--limit', type=int, default=None)
-parser.add_argument('--use-ctx', action='store_true',
-                    help='Use context sentences for relation extraction only')
-parser.add_argument('--perturbed', action='store_true',
-                    help='Perturbed sentence evaluation of relation extraction: replace each object in dataset with a random other object')
-parser.add_argument('--patience', type=int, default=5)
-parser.add_argument('--num-cand', type=int, default=10)
-parser.add_argument('--sentence-size', type=int, default=50)
-
-parser.add_argument('--debug', action='store_true')
-args = parser.parse_args(['--train', 'webnlg_dataset/webnlg_train.jsonl', '--dev', 'webnlg_dataset/webnlg_dev.jsonl', '--num-cand', '10', '--accumulation-steps', '1', '--model-name', 'facebook/bart-base', '--bsz', '56', '--eval-size', '56', '--iters', config_['iter'], '--tokenize-labels', '--filter', '--print-lama'])
-
-if args.debug:
-    level = logging.DEBUG
-else:
-    level = logging.INFO
-logging.basicConfig(level=level)
-
+def set_logger(config):
+    if config['debug']:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
+        datefmt='%d-%m-%Y:%H:%M:%S',
+        filemode='w',
+        filename=config['log_file'],
+        level=level)
+    logger = logging.getLogger(__name__)
+    return logger
 
 
 def set_seed(seed: int):
@@ -97,50 +55,34 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    
-set_seed(args.seed)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 
 def add_task_specific_tokens(tokenizer):
     tokenizer.add_special_tokens({
-        'additional_special_tokens': ['[T]', '[Y]']
+        'additional_special_tokens': ['[T]']
     })
     tokenizer.trigger_token = '[T]'
     tokenizer.trigger_token_id = tokenizer.convert_tokens_to_ids('[T]')
-    # NOTE: BERT and RoBERTa tokenizers work properly if [X] is not a special token...
-    # tokenizer.lama_x = '[X]'
-    # tokenizer.lama_x_id = tokenizer.convert_tokens_to_ids('[X]')
-    tokenizer.lama_y = '[Y]'
-    tokenizer.lama_x_id = tokenizer.convert_tokens_to_ids('[Y]')
+
 
 def load_pretrained(model_name):
     """
     Loads pretrained HuggingFace config/model/tokenizer, as well as performs required
     initialization steps to facilitate working with triggers.
     """
-    config = AutoConfig.from_pretrained(model_name)
+    pretrained_model_config = AutoConfig.from_pretrained(model_name)
     model = AutoModelWithLMHead.from_pretrained(model_name)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
     add_task_specific_tokens(tokenizer)
-    return config, model, tokenizer
-
-logger.info('Loading model, tokenizer, etc.')
-config, model, tokenizer = load_pretrained(args.model_name)
-_ = model.to(device)
+    return pretrained_model_config, model, tokenizer
 
 
-
-def get_embeddings(model, config):
+def get_embeddings(model, pretrained_model_config):
     """Returns the wordpiece embedding module."""
     base_model = model.get_encoder()
     embeddings = base_model.embed_tokens
     return embeddings
-
-embeddings = get_embeddings(model, config)
-
 
 
 class GradientStorage:
@@ -157,9 +99,6 @@ class GradientStorage:
 
     def get(self):
         return self._stored_gradient
-    
-embedding_gradient = GradientStorage(embeddings)
-
 
 
 def load_jsonl(fname):
@@ -167,11 +106,9 @@ def load_jsonl(fname):
         for line in f:
             yield json.loads(line)
 
-def default_prompt():
-    return 0
 
 def generate_property_map(fname):
-    property_map = defaultdict(default_prompt)
+    property_map = defaultdict(lambda: 0)
     token_id = 1
     for x in load_jsonl(fname):
         for property in x['properties']:
@@ -180,32 +117,16 @@ def generate_property_map(fname):
                 token_id += 1
     return property_map
 
-if args.property_map is not None and args.property_prompt is not None:
-    property_map = json.loads(args.property_map)
-    property_prompt = torch.load(args.property_prompt).to(device)
-    logger.info(f"Property map: {property_map}")
-else:
-    property_map = generate_property_map(args.train)
-    property_prompt = torch.ones((len(property_map)+1, 3), dtype=torch.int64) * tokenizer.mask_token_id
-    property_prompt = property_prompt.to(device)
-    with open('property_map.json', 'w') as f_out:
-        json.dump(property_map, f_out)
-    logger.info('New property map generated')
-best_property_prompt = property_prompt.clone()
+
+def camel_case_split(identifier):
+    matches = re.finditer('.+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)', identifier)
+    return [m.group(0) for m in matches]
 
 
+def split_label(label):
+    label_split = re.split('[^a-zA-Z0-9\n\.]', label)
+    return sum([camel_case_split(label2) for label2 in label_split],[])
 
-def encode_label(tokenizer, label):
-    """
-    Helper function for encoding labels. Deals with the subtleties of handling multiple tokens.
-    """
-    if isinstance(label, str):
-        encoded = tokenizer(label, return_tensors='pt')['input_ids']
-    elif isinstance(label, list):
-        encoded = torch.tensor(tokenizer.convert_tokens_to_ids(label)).unsqueeze(0)
-    elif isinstance(label, int):
-        encoded = torch.tensor([[label]])
-    return encoded
 
 class TriggerTemplatizer:
     """
@@ -238,6 +159,7 @@ class TriggerTemplatizer:
         self._prompt_len = prompt_len
         self._property_map = property_map
 
+
     def __call__(self, format_kwargs:dict):
         # Format the template string
         format_kwargs = format_kwargs.copy()
@@ -261,26 +183,23 @@ class TriggerTemplatizer:
         model_inputs['properties'] = torch.LongTensor([[self._property_map[p] for p in properties]])
 
         # Encode the label(s)
-        label_id = encode_label(
-            tokenizer=self._tokenizer,
-            label=label
-        )
-        
-        model_inputs['labels'] = label_id
+        model_inputs['labels'] = self.encode_label(label)
 
         return model_inputs
+    
+    
+    def encode_label(self, label):
+        """
+        Helper function for encoding labels. Deals with the subtleties of handling multiple tokens.
+        """
+        if isinstance(label, str):
+            encoded = self._tokenizer(label, return_tensors='pt')['input_ids']
+        elif isinstance(label, list):
+            encoded = torch.tensor(self._tokenizer.convert_tokens_to_ids(label)).unsqueeze(0)
+        elif isinstance(label, int):
+            encoded = torch.tensor([[label]])
+        return encoded
 
-templatizer = TriggerTemplatizer(
-    tokenizer,
-    prompt_len=3,
-    property_map=property_map
-)
-
-
-
-def pad_squeeze_sequence(sequence, *args, **kwargs):
-    """Squeezes fake batch dimension added by tokenizer before padding sequence."""
-    return pad_sequence([x.squeeze(0) for x in sequence], *args, **kwargs)
 
 class Collator:
     """
@@ -302,45 +221,19 @@ class Collator:
                 padding_value = 0
             # NOTE: We need to squeeze to get rid of fake batch dim.
             sequence = [x[key] for x in features]
-            padded = pad_squeeze_sequence(sequence, batch_first=True, padding_value=padding_value)
+            padded = Collator.pad_squeeze_sequence(sequence, batch_first=True, padding_value=padding_value)
             padded_inputs[key] = padded
         return padded_inputs
-
-logger.info('Loading datasets')
-collator = Collator(pad_token_id=tokenizer.pad_token_id)
-
+    
+    @staticmethod
+    def pad_squeeze_sequence(sequence, *args, **kwargs):
+        """Squeezes fake batch dimension added by tokenizer before padding sequence."""
+        return pad_sequence([x.squeeze(0) for x in sequence], *args, **kwargs)
 
 
 def load_trigger_dataset(fname, templatizer):
     return [templatizer(x) for x in load_jsonl(fname)]
 
-# if args.perturbed:
-#     train_dataset = load_augmented_trigger_dataset(args.train, templatizer, limit=args.limit)
-# else:
-train_dataset = load_trigger_dataset(args.train, templatizer)
-train_loader = DataLoader(train_dataset, batch_size=args.bsz, collate_fn=collator)
-
-# train_2_dataset = load_trigger_dataset(args.train, templatizer)
-# train_2_loader = DataLoader(train_2_dataset, batch_size=args.bsz, collate_fn=collator)
-
-# if args.perturbed:
-#     dev_dataset = utils.load_augmented_trigger_dataset(args.dev, templatizer)
-# else:
-dev_dataset = load_trigger_dataset(args.dev, templatizer)
-dev_loader = DataLoader(dev_dataset, batch_size=args.eval_size, shuffle=False, collate_fn=collator)
-
-
-
-def replace_trigger_tokens(model_inputs:dict, trigger_ids:torch.LongTensor, trigger_mask:torch.BoolTensor):
-    """Replaces the trigger tokens in input_ids."""
-    out = model_inputs.copy()
-    input_ids = model_inputs['input_ids']
-    # try:
-    filled = input_ids.masked_scatter(trigger_mask, trigger_ids)
-    # except RuntimeError:
-    #     filled = input_ids
-    out['input_ids'] = filled
-    return out
 
 class PredictWrapper:
     """
@@ -356,7 +249,7 @@ class PredictWrapper:
         trigger_mask = model_inputs.pop('trigger_mask')
         properties = model_inputs.pop('properties')
         # predict_mask = model_inputs.pop('predict_mask')
-        model_inputs = replace_trigger_tokens(model_inputs, property_prompt[properties].squeeze(1), trigger_mask)
+        model_inputs = PredictWrapper.replace_trigger_tokens(model_inputs, property_prompt[properties].squeeze(1), trigger_mask)
         if 'labels' in model_inputs:
             outputs = self._model(**model_inputs)
             return outputs.loss, outputs.logits
@@ -365,170 +258,228 @@ class PredictWrapper:
             return outputs.logits
         # predict_logits = logits.masked_select(predict_mask.unsqueeze(-1)).view(logits.size(0), -1)
         
-    
-predictor = PredictWrapper(model)
+    @staticmethod
+    def replace_trigger_tokens(model_inputs:dict, trigger_ids:torch.LongTensor, trigger_mask:torch.BoolTensor):
+        """Replaces the trigger tokens in input_ids."""
+        out = model_inputs.copy()
+        input_ids = model_inputs['input_ids']
+        # try:
+        filled = input_ids.masked_scatter(trigger_mask, trigger_ids)
+        # except RuntimeError:
+        #     filled = input_ids
+        out['input_ids'] = filled
+        return out
 
 
-
-logger.info('Evaluating')
-for model_inputs in dev_loader:
-    model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
-    with torch.no_grad():
-        dev_metric, predict_logits = predictor(model_inputs, property_prompt)
-logger.info(f'Dev metric: {dev_metric.item()}')
-
-best_dev_metric = -float('inf')
-# Measure elapsed time of trigger search
-start = time.time()
-
-
-
-def hotflip_attack(averaged_grad,
+def hotflip_attack(grad,
                    embedding_matrix,
                    num_candidates=1):
     """Returns the top candidate replacements."""
     with torch.no_grad():
         gradient_dot_embedding_matrix = torch.matmul(
-            averaged_grad,
+            grad,
             embedding_matrix.T
         )
         _, top_k_ids = gradient_dot_embedding_matrix.topk(num_candidates)
 
     return top_k_ids, (gradient_dot_embedding_matrix != 0).any(dim=1)
 
-for i in tqdm(range(args.iters)):
 
-    logger.info(f'Iteration: {i}')
-
-    logger.info('Accumulating Gradient')
-    model.zero_grad()
-
-    train_iter = iter(train_loader)
-    averaged_grad = None
-
-    # Accumulate
-    for step in range(args.accumulation_steps):
-
-        # Shuttle inputs to GPU
-        try:
-            model_inputs = next(train_iter)
-        except:
-            logger.warning(
-                'Insufficient data for number of accumulation steps. '
-                'Effective batch size will be smaller than specified.'
-            )
-            break
-        model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
-        loss, predict_logits = predictor(model_inputs, property_prompt)
-        loss.backward()
-
-        grad = embedding_gradient.get()
-        bsz, _, emb_dim = grad.size()
-        selection_mask = model_inputs['trigger_mask'].unsqueeze(-1)
-        grad = torch.masked_select(grad, selection_mask)
-        grad = grad.view(-1, 3, emb_dim)
-        
-        properties = model_inputs['properties']
-        properties = properties[properties != 0]
-        properties_matrix = F.one_hot(properties, num_classes=property_prompt.size(0)) * 1.0
-        grad_ = torch.swapaxes(torch.swapaxes(grad, 0, 1), 1, 2)
-        grad_sum_ = torch.matmul(grad_, properties_matrix)
-
-        if averaged_grad is None:
-            averaged_grad = grad_sum_ / args.accumulation_steps
-        else:
-            averaged_grad += grad_sum_ / args.accumulation_steps
-
-    logger.info('Evaluating Candidates')
-    train_iter = iter(train_loader)
-    # train_2_iter = iter(train_2_loader)
-
-    token_to_flip = torch.randint(0, 3, (property_prompt.size(0),)).to(device)
-    token_to_flip_one_hot = (F.one_hot(token_to_flip, num_classes=3) * 1.0)
-    selected_grad = torch.matmul(torch.swapaxes(grad_sum_, 0, 2), token_to_flip_one_hot.unsqueeze(-1)).squeeze(-1)
-    candidates, valid_properties = hotflip_attack(selected_grad, embeddings.weight, num_candidates=args.num_cand)
-
-    current_score = 0
-    candidate_scores = torch.zeros(args.num_cand, device=device)
-    # candidate_scores = torch.zeros(args.num_cand)
-    denom = 0
-    for step in range(args.accumulation_steps):
-
-        try:
-            model_inputs = next(train_iter)
-        except:
-            logger.warning(
-                'Insufficient data for number of accumulation steps. '
-                'Effective batch size will be smaller than specified.'
-            )
-            break
-        model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
-        labels = model_inputs['labels']
-        with torch.no_grad():
-            eval_metric, predict_logits = predictor(model_inputs, property_prompt)
-
-        # Update current score
-        current_score += eval_metric.sum()
-        denom += labels.size(0)
-
-        # NOTE: Instead of iterating over tokens to flip we randomly change just one each
-        # time so the gradients don't get stale.
-        for i in range(candidates.size(1)):
-
-            temp_property_prompt = property_prompt.clone()
-            temp_property_prompt[valid_properties, token_to_flip[valid_properties]] = candidates[valid_properties, i]
-            with torch.no_grad():
-                eval_metric, predict_logits = predictor(model_inputs, temp_property_prompt)
-
-            candidate_scores[i] += eval_metric.sum()
-
-    # TODO: Something cleaner. LAMA templates can't have mask tokens, so if
-    # there are still mask tokens in the trigger then set the current score
-    # to -inf.
-    
-    # if args.print_lama:
-    #     if trigger_ids.eq(tokenizer.mask_token_id).any():
-    #         current_score = float('-inf')
-
-    if (candidate_scores < current_score).any():
-        logger.info('Better trigger detected.')
-        best_candidate_score = candidate_scores.max()
-        best_candidate_idx = candidate_scores.argmax()
-        property_prompt[valid_properties, token_to_flip[valid_properties]] = candidates[valid_properties, best_candidate_idx]
-        logger.info(f'Train metric: {best_candidate_score / (denom + 1e-13): 0.4f}')
-    else:
-        logger.info('No improvement detected. Skipping evaluation.')
-        continue
-
+def eval(dev_loader, predictor, property_prompt, logger):
     logger.info('Evaluating')
-    # numerator = 0
-    # denominator = 0
     for model_inputs in dev_loader:
         model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
-        labels = model_inputs['labels']
         with torch.no_grad():
             dev_metric, predict_logits = predictor(model_inputs, property_prompt)
-        # numerator += loss.sum().item()
-        # denominator += labels.size(0)
-    # dev_metric = numerator / (denominator + 1e-13)
-
-    # logger.info(f'Trigger tokens: {tokenizer.convert_ids_to_tokens(trigger_ids.squeeze(0))}')
     logger.info(f'Dev metric: {dev_metric.item()}')
+    return dev_metric
+        
 
-    # TODO: Something cleaner. LAMA templates can't have mask tokens, so if
-    # there are still mask tokens in the trigger then set the current score
-    # to -inf.
+def train(config, model, logger, train_loader, dev_loader, device, predictor, embedding_gradient, property_prompt, embeddings):
+    best_dev_metric = float('inf')
+    best_property_prompt = property_prompt.clone()
     
-    # if args.print_lama:
-    #     if best_trigger_ids.eq(tokenizer.mask_token_id).any():
-    #         best_dev_metric = float('-inf')
+    for i in tqdm(range(config['iter'])):
+        
+        update_num = 0
 
-    if dev_metric < best_dev_metric:
-        logger.info('Best performance so far')
-        best_property_prompt = property_prompt.clone()
-        best_dev_metric = dev_metric
+        logger.info(f'Iteration: {i}')
+
+        logger.info('Accumulating Gradient')
+
+        # Shuttle inputs to GPU
+        for model_inputs in train_loader:
+            model.zero_grad()
+            model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
+            loss, predict_logits = predictor(model_inputs, property_prompt)
+            loss.backward()
+
+            grad = embedding_gradient.get()
+            bsz, _, emb_dim = grad.size()
+            selection_mask = model_inputs['trigger_mask'].unsqueeze(-1)
+            grad = torch.masked_select(grad, selection_mask)
+            grad = grad.view(-1, 3, emb_dim)
+            
+            properties = model_inputs['properties']
+            properties = properties[properties != 0]
+            properties_matrix = F.one_hot(properties, num_classes=property_prompt.size(0)) * 1.0
+            grad_ = torch.swapaxes(torch.swapaxes(grad, 0, 1), 1, 2)
+            grad_sum_ = torch.matmul(grad_, properties_matrix)
+
+            # Generate candidates
+            token_to_flip = torch.randint(0, 3, (property_prompt.size(0),)).to(device)
+            token_to_flip_one_hot = (F.one_hot(token_to_flip, num_classes=3) * 1.0)
+            selected_grad = torch.matmul(torch.swapaxes(grad_sum_, 0, 2), token_to_flip_one_hot.unsqueeze(-1)).squeeze(-1)
+            candidates, valid_properties = hotflip_attack(selected_grad, embeddings.weight, num_candidates=config['num_cand'])
+
+            # Evaluate candidates
+            
+            # Get current score
+            current_score = loss.detach().sum()
+            # Initialize candidate scores
+            candidate_scores = torch.zeros(config['num_cand'], device=device)
+            
+            labels = model_inputs['labels']
+            denom = labels.size(0)
+
+            # NOTE: Instead of iterating over tokens to flip we randomly change just one each
+            # time so the gradients don't get stale.
+            for i in range(candidates.size(1)):
+
+                temp_property_prompt = property_prompt.clone()
+                temp_property_prompt[valid_properties, token_to_flip[valid_properties]] = candidates[valid_properties, i]
+                with torch.no_grad():
+                    eval_metric, predict_logits = predictor(model_inputs, temp_property_prompt)
+
+                candidate_scores[i] = eval_metric.sum()
+
+            # TODO: Something cleaner. LAMA templates can't have mask tokens, so if
+            # there are still mask tokens in the trigger then set the current score
+            # to -inf.
+            
+            # if args.print_lama:
+            #     if trigger_ids.eq(tokenizer.mask_token_id).any():
+            #         current_score = float('-inf')
+
+            if (candidate_scores < current_score).any():
+                best_candidate_score = candidate_scores.min()
+                logger.info(f'Better trigger detected. Train metric: {best_candidate_score / (denom + 1e-13): 0.4f}')
+                best_candidate_idx = candidate_scores.argmin()
+                property_prompt[valid_properties, token_to_flip[valid_properties]] = candidates[valid_properties, best_candidate_idx]
+                update_num += 1
+            else:
+                continue
+        
+        if not update_num:
+            logger.info('No update, skip eval')
+            continue
+        
+        dev_metric = eval(dev_loader, predictor, property_prompt, logger)
+
+        # TODO: Something cleaner. LAMA templates can't have mask tokens, so if
+        # there are still mask tokens in the trigger then set the current score
+        # to -inf.
+        
+        # if args.print_lama:
+        #     if best_trigger_ids.eq(tokenizer.mask_token_id).any():
+        #         best_dev_metric = float('-inf')
+
+        if dev_metric < best_dev_metric:
+            logger.info(f'Best performance so far. Dev metric: {dev_metric: 0.4f}')
+            best_property_prompt = property_prompt.clone()
+            best_dev_metric = dev_metric
 
 
+    logger.info(f'Best dev metric: {best_dev_metric}')
+    torch.save(best_property_prompt, config['property_prompt_cp'])
 
-logger.info(f'Best dev metric: {best_dev_metric}')
-torch.save(best_property_prompt, config_['model_cp'])
+
+if __name__ == '__main__':
+    
+    # Get the config
+    config = get_config()
+    
+    
+    # Basic setup
+    os.environ["CUDA_VISIBLE_DEVICES"]=config['device']
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    set_seed(config['seed'])
+    
+    
+    # Setup logger
+    logger = set_logger(config)
+    
+    
+    # Setup pretrained model
+    logger.info('Loading model, tokenizer, etc.')
+    pretrained_model_config, model, tokenizer = load_pretrained(config['model_name'])
+    model.to(device)
+    
+    
+    # Get embeddings and embedding gradients from pretrained model
+    embeddings = get_embeddings(model, pretrained_model_config)
+    embedding_gradient = GradientStorage(embeddings)
+    
+    
+    # Load property map
+    if os.path.exists(config['property_map']):
+        property_map = json.load(open(config['property_map']))
+        logger.info(f"Property map: {property_map}")
+    else:
+        property_map = generate_property_map(config['train'])
+        with open(config['property_map'], 'w') as f_out:
+            json.dump(property_map, f_out)
+        logger.info('New property map generated')
+        
+        
+    # Load property prompt paramenter
+    if os.path.exists(config['property_prompt_cp']):
+        property_prompt = torch.load(config['property_prompt_cp'])
+    else:
+        property_prompt = torch.ones((len(property_map)+1, 3), dtype=torch.int64) * tokenizer.mask_token_id
+        if config['propertyInit']:
+            logger.info('Using Property Init')
+            property_map_sorted = sorted(property_map.items(),key=lambda x:x[1])
+            property_splits = sum(list(map(lambda l: (split_label(l[0])+[tokenizer.mask_token]*3)[:3],property_map_sorted)),[])
+            property_prompt[1:,:] = torch.tensor(tokenizer.convert_tokens_to_ids(property_splits), dtype=torch.int64).reshape((len(property_map), 3))
+        else:
+            logger.info('Using Mask Init')
+
+    property_prompt = property_prompt.to(device)
+    
+    
+    # Setup trigger templatizer
+    templatizer = TriggerTemplatizer(tokenizer, prompt_len=3, property_map=property_map)
+    
+    
+    # Loading datasets
+    logger.info('Loading datasets')
+    collator = Collator(pad_token_id=tokenizer.pad_token_id)
+    
+    train_dataset = load_trigger_dataset(config['train'], templatizer)
+    train_loader = DataLoader(train_dataset, batch_size=config['bsz'], collate_fn=collator)
+
+    dev_dataset = load_trigger_dataset(config['dev'], templatizer)
+    dev_loader = DataLoader(dev_dataset, batch_size=config['eval_size'], shuffle=False, collate_fn=collator)
+
+
+    # Setup predict wrapper
+    predictor = PredictWrapper(model)
+    
+    # Evaluate the initial prompt
+    dev_metric = eval(dev_loader, predictor, property_prompt, logger)
+    logger.info(f'Init dev metric: {dev_metric}')
+    
+    # Start training
+    train(config, 
+          model=model, 
+          logger=logger, 
+          train_loader=train_loader, 
+          dev_loader=dev_loader, 
+          device=device, 
+          predictor=predictor, 
+          embedding_gradient=embedding_gradient, 
+          property_prompt=property_prompt, 
+          embeddings=embeddings)
+    
+    
