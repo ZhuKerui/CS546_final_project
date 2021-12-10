@@ -1,14 +1,14 @@
-log_file: 'out/single/propertyInit_train_genre_len1.txt'
+log_file: 'out/single/propertyInit_train_associatedMusicalArtist_len2.txt'
 device: '1'
 property_map: 'property_map.json'
-property_prompt_cp: 'out/single/propertyInit_train_genre_len1.pt'
+property_prompt_cp: 'out/single/propertyInit_train_associatedMusicalArtist_len2.pt'
 propertyInit: true
-prompt_len: 1
+prompt_len: 2
 
 # Training setting
 iter: 20
-train: 'webnlg_dataset/single/genre/Train.jsonl'
-dev: 'webnlg_dataset/single/genre/Dev.jsonl'
+train: 'webnlg_dataset/single/associatedMusicalArtist/Train.jsonl'
+dev: 'webnlg_dataset/single/associatedMusicalArtist/Dev.jsonl'
 num_cand: 30
 accumulation_steps: 1
 model_name: 'facebook/bart-base'
@@ -19,3 +19,5 @@ filter: true
 print_lama: true
 seed: 0
 debug: true
+
+# award, birthPlace, club, associatedMusicalArtist, 
