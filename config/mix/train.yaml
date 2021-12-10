@@ -1,15 +1,15 @@
-log_file: 'out/mix/maskInit_train_origFunc.txt'
-device: '1'
+log_file: 'out/mix/propertyInit_train_origFunc_len3.txt'
+device: '2'
 property_map: 'property_map.json'
-property_prompt_cp: 'out/mix/maskInit_train_origFunc.pt'
-propertyInit: false
+property_prompt_cp: 'out/mix/propertyInit_train_origFunc_len3.pt'
+propertyInit: true
+prompt_len: 3
 
 # Training setting
-iter: 20
+iter: 1
 train: 'webnlg_dataset/mix/webnlg_train.jsonl'
 dev: 'webnlg_dataset/mix/webnlg_dev.jsonl'
 num_cand: 10
-accumulation_steps: 1
 model_name: 'facebook/bart-base'
 bsz: 56
 eval_size: 56

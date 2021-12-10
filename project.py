@@ -269,6 +269,18 @@ class PredictWrapper:
         #     filled = input_ids
         out['input_ids'] = filled
         return out
+    
+    def generate(self, model_inputs:dict, property_prompt:torch.LongTensor):
+        # Copy dict so pop operations don't have unwanted side-effects
+        model_inputs = model_inputs.copy()
+        trigger_mask = model_inputs.pop('trigger_mask')
+        properties = model_inputs.pop('properties')
+        if 'labels' in model_inputs:
+            model_inputs.pop('labels')
+        model_inputs = PredictWrapper.replace_trigger_tokens(model_inputs, property_prompt[properties].squeeze(1), trigger_mask)
+        tokens = self._model.generate(**model_inputs)
+        return tokens, model_inputs['input_ids']
+        # predict_logits = logits.masked_select(predict_mask.unsqueeze(-1)).view(logits.size(0), -1)
 
 
 def hotflip_attack(grad,
@@ -293,12 +305,41 @@ def eval(dev_loader, predictor, property_prompt, logger):
             dev_metric, predict_logits = predictor(model_inputs, property_prompt)
     logger.info(f'Dev metric: {dev_metric.item()}')
     return dev_metric
-        
+
+def dump_prompt(property_map, property_prompt, logger):
+    logger.info('Dumping prompts')
+    out_str = [] 
+    property_map_sorted = sorted(property_map.items(),key=lambda x:x[1])
+    for (label, index), prompt in zip(property_map_sorted, property_prompt[1:]):
+        out_str.append(label+'\t'+tokenizer.decode(prompt))
+    with open(config['log_file']+'.tok.txt','w') as f:
+        f.write('\n'.join(out_str))
+    return
+
+def generate(dev_loader, predictor, property_prompt, logger):
+    logger.info('Generating')
+    with open(config['log_file']+'.gen.txt','w') as f:
+        for model_inputs in dev_loader:
+            model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
+            with torch.no_grad():
+                tokens, modified_input_ids = predictor.generate(model_inputs, property_prompt)
+                out_str = []
+                for i in range(model_inputs['labels'].shape[0]):
+                    out_str.append('\n'.join([
+                        tokenizer.decode(model_inputs['labels'][i], skip_special_tokens=False),
+                        tokenizer.decode(tokens[i], skip_special_tokens=False)
+                    ]))
+                f.write('\n\n'.join(out_str)+'\n\n')
+    return
+
 
 def train(config, model, logger, train_loader, dev_loader, device, predictor, embedding_gradient, property_prompt, embeddings):
-    best_dev_metric = float('inf')
-    best_property_prompt = property_prompt.clone()
+    # Evaluate the initial prompt
+    dev_metric = eval(dev_loader, predictor, property_prompt, logger)
+    logger.info(f'Init dev metric: {dev_metric}')
     
+    best_dev_metric = dev_metric
+    best_property_prompt = property_prompt.clone()
     for i in tqdm(range(config['iter'])):
         
         update_num = 0
@@ -313,13 +354,12 @@ def train(config, model, logger, train_loader, dev_loader, device, predictor, em
             model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
             loss, predict_logits = predictor(model_inputs, property_prompt)
             loss.backward()
-
+            # dict_keys(['input_ids', 'attention_mask', 'trigger_mask', 'properties', 'labels'])
             grad = embedding_gradient.get()
             bsz, _, emb_dim = grad.size()
             selection_mask = model_inputs['trigger_mask'].unsqueeze(-1)
             grad = torch.masked_select(grad, selection_mask)
-            grad = grad.view(-1, 3, emb_dim)
-            
+            grad = grad.view(-1, config['prompt_len'], emb_dim)
             properties = model_inputs['properties']
             properties = properties[properties != 0]
             properties_matrix = F.one_hot(properties, num_classes=property_prompt.size(0)) * 1.0
@@ -327,8 +367,8 @@ def train(config, model, logger, train_loader, dev_loader, device, predictor, em
             grad_sum_ = torch.matmul(grad_, properties_matrix)
 
             # Generate candidates
-            token_to_flip = torch.randint(0, 3, (property_prompt.size(0),)).to(device)
-            token_to_flip_one_hot = (F.one_hot(token_to_flip, num_classes=3) * 1.0)
+            token_to_flip = torch.randint(0, config['prompt_len'], (property_prompt.size(0),)).to(device)
+            token_to_flip_one_hot = (F.one_hot(token_to_flip, num_classes=config['prompt_len']) * 1.0)
             selected_grad = torch.matmul(torch.swapaxes(grad_sum_, 0, 2), token_to_flip_one_hot.unsqueeze(-1)).squeeze(-1)
             candidates, valid_properties = hotflip_attack(selected_grad, embeddings.weight, num_candidates=config['num_cand'])
 
@@ -352,14 +392,13 @@ def train(config, model, logger, train_loader, dev_loader, device, predictor, em
                     eval_metric, predict_logits = predictor(model_inputs, temp_property_prompt)
 
                 candidate_scores[i] = eval_metric.sum()
-
+            
             # TODO: Something cleaner. LAMA templates can't have mask tokens, so if
             # there are still mask tokens in the trigger then set the current score
             # to -inf.
             
-            # if args.print_lama:
-            #     if trigger_ids.eq(tokenizer.mask_token_id).any():
-            #         current_score = float('-inf')
+            if property_prompt[valid_properties].eq(tokenizer.mask_token_id).any():
+                current_score = float('inf')
 
             if (candidate_scores < current_score).any():
                 best_candidate_score = candidate_scores.min()
@@ -380,9 +419,10 @@ def train(config, model, logger, train_loader, dev_loader, device, predictor, em
         # there are still mask tokens in the trigger then set the current score
         # to -inf.
         
-        # if args.print_lama:
-        #     if best_trigger_ids.eq(tokenizer.mask_token_id).any():
-        #         best_dev_metric = float('-inf')
+        
+        if property_prompt.eq(tokenizer.mask_token_id).any():
+            # best_dev_metric = float('inf')
+            logger.info('MASK still exist')
 
         if dev_metric < best_dev_metric:
             logger.info(f'Best performance so far. Dev metric: {dev_metric: 0.4f}')
@@ -436,20 +476,19 @@ if __name__ == '__main__':
     if os.path.exists(config['property_prompt_cp']):
         property_prompt = torch.load(config['property_prompt_cp'])
     else:
-        property_prompt = torch.ones((len(property_map)+1, 3), dtype=torch.int64) * tokenizer.mask_token_id
+        property_prompt = torch.ones((len(property_map)+1, config['prompt_len']), dtype=torch.int64) * tokenizer.mask_token_id
         if config['propertyInit']:
             logger.info('Using Property Init')
             property_map_sorted = sorted(property_map.items(),key=lambda x:x[1])
-            property_splits = sum(list(map(lambda l: (split_label(l[0])+[tokenizer.mask_token]*3)[:3],property_map_sorted)),[])
-            property_prompt[1:,:] = torch.tensor(tokenizer.convert_tokens_to_ids(property_splits), dtype=torch.int64).reshape((len(property_map), 3))
+            property_splits = sum(list(map(lambda l: (split_label(l[0])+[tokenizer.mask_token]*config['prompt_len'])[:config['prompt_len']],property_map_sorted)),[])
+            property_prompt[1:,:] = torch.tensor(tokenizer.convert_tokens_to_ids(property_splits), dtype=torch.int64).reshape((len(property_map), config['prompt_len']))
         else:
             logger.info('Using Mask Init')
-
     property_prompt = property_prompt.to(device)
     
     
     # Setup trigger templatizer
-    templatizer = TriggerTemplatizer(tokenizer, prompt_len=3, property_map=property_map)
+    templatizer = TriggerTemplatizer(tokenizer, prompt_len=config['prompt_len'], property_map=property_map)
     
     
     # Loading datasets
@@ -466,10 +505,6 @@ if __name__ == '__main__':
     # Setup predict wrapper
     predictor = PredictWrapper(model)
     
-    # Evaluate the initial prompt
-    dev_metric = eval(dev_loader, predictor, property_prompt, logger)
-    logger.info(f'Init dev metric: {dev_metric}')
-    
     # Start training
     train(config, 
           model=model, 
@@ -482,4 +517,9 @@ if __name__ == '__main__':
           property_prompt=property_prompt, 
           embeddings=embeddings)
     
+    property_prompt = torch.load(config['property_prompt_cp'])
+    dump_prompt(property_map, property_prompt, logger)
+    generate(dev_loader, predictor, property_prompt, logger)
+    
+    logger.info('Done')
     

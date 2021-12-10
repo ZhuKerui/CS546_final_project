@@ -1,11 +1,12 @@
-log_file: 'out/mix/propertyInit_train_origFunc_origDev.txt'
-device: '1'
+log_file: 'out/mix/propertyInit_noTrain_origFunc_len3.txt'
+device: '2'
 property_map: 'property_map.json'
-property_prompt_cp: 'out/mix/propertyInit_train_origFunc_origDev.pt'
+property_prompt_cp: 'out/mix/propertyInit_noTrain_origFunc_len3.pt'
 propertyInit: true
+prompt_len: 3
 
 # Training setting
-iter: 1000
+iter: 0
 train: 'webnlg_dataset/mix/webnlg_train.jsonl'
 dev: 'webnlg_dataset/mix/webnlg_dev.jsonl'
 num_cand: 10

@@ -1,0 +1,21 @@
+log_file: 'out/single/propertyInit_train_genre_len1.txt'
+device: '1'
+property_map: 'property_map.json'
+property_prompt_cp: 'out/single/propertyInit_train_genre_len1.pt'
+propertyInit: true
+prompt_len: 1
+
+# Training setting
+iter: 20
+train: 'webnlg_dataset/single/genre/Train.jsonl'
+dev: 'webnlg_dataset/single/genre/Dev.jsonl'
+num_cand: 30
+accumulation_steps: 1
+model_name: 'facebook/bart-base'
+bsz: 10
+eval_size: 5
+tokenize_labels: true
+filter: true
+print_lama: true
+seed: 0
+debug: true
